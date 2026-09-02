@@ -429,7 +429,10 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 	@Override
 	public void eraseLineToEnd() {
 		synchronized (fTerminal) {
-			eraseWhole(toAbsoluteLine(fCursorLine), fCursorColumn, fColumns);
+			int line = toAbsoluteLine(fCursorLine);
+			eraseWhole(line, fCursorColumn, fColumns);
+			// Nothing is left out to the margin, so the line ends where the cursor is.
+			fTerminal.clearWrappedLine(line);
 		}
 	}
 
@@ -641,6 +644,11 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 						line = doLineWrap();
 					}
 				} else {
+					// Writing that stops short of the margin says the line ends here.
+					// A program that draws its own screen writes the same row again and
+					// again, and a row that was folded in one frame is a row of its own
+					// in the next, so the mark has to be able to come off.
+					fTerminal.clearWrappedLine(line);
 					setCursorColumn(col);
 				}
 			}
