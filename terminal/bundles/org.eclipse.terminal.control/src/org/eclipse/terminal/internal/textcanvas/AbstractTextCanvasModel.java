@@ -34,6 +34,8 @@ abstract public class AbstractTextCanvasModel implements ITextCanvasModel {
 	private boolean fShowCursor;
 	private long fCursorTime;
 	private boolean fCursorIsEnabled;
+	// set by the emulator thread, read when painting
+	private volatile boolean fCursorHidden;
 	private final ITerminalTextDataSnapshot fSnapshot;
 	private int fLines;
 
@@ -150,7 +152,12 @@ abstract public class AbstractTextCanvasModel implements ITextCanvasModel {
 
 	@Override
 	public boolean isCursorOn() {
-		return fShowCursor && fCursorIsEnabled;
+		return fShowCursor && fCursorIsEnabled && !fCursorHidden;
+	}
+
+	/** A program hides the cursor while it draws, or for good, with DEC mode 25. */
+	public void setCursorHidden(boolean hidden) {
+		fCursorHidden = hidden;
 	}
 
 	/**

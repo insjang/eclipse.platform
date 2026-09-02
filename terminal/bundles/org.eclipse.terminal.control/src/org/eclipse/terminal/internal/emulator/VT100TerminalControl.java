@@ -172,6 +172,9 @@ public class VT100TerminalControl implements ITerminalControlForText, ITerminalC
 	 */
 	private final IPropertyChangeListener fPreferenceListener = this::updatePreferences;
 	private final IPropertyChangeListener fFontListener = this::updateFont;
+	private boolean fBracketedPaste;
+	private static final String PASTE_START = "\u001b[200~"; //$NON-NLS-1$
+	private static final String PASTE_END = "\u001b[201~"; //$NON-NLS-1$
 
 	/**
 	 * Is protected by synchronize on this
@@ -308,7 +311,7 @@ public class VT100TerminalControl implements ITerminalControlForText, ITerminalC
 		if (strText == null) {
 			return false;
 		}
-		sendString(strText);
+		sendString(pasteText(strText, fBracketedPaste));
 		return true;
 	}
 
@@ -567,6 +570,30 @@ public class VT100TerminalControl implements ITerminalControlForText, ITerminalC
 	@Override
 	public Shell getShell() {
 		return getCtlText().getShell();
+	}
+
+	/**
+	 * Pasted text as it goes to the program: each line break as the Enter key sends
+	 * it, a CR, as Windows Terminal (CR LF to CR) and tmux (LF to CR) paste. A
+	 * Windows clipboard's CR LF would reach the shell as two breaks, and readline
+	 * then draws two rows for every line: a paste taller than the screen pushes the
+	 * prompt off it, and the redraw on the next key lands where the prompt no
+	 * longer is. With bracketed paste on, the text is marked as pasted.
+	 */
+	public static String pasteText(String text, boolean bracketedPaste) {
+		String lines = text.replace("\r\n", "\r").replace('\n', '\r'); //$NON-NLS-1$ //$NON-NLS-2$
+		return bracketedPaste ? bracketed(lines) : lines;
+	}
+
+	/**
+	 * Marks text as pasted, so that a program takes the newlines in it as part of
+	 * the text rather than as the user pressing return on each line. The text cannot
+	 * end the paste early: every ESC and C1 CSI goes, as xterm does, so no end marker
+	 * can be left over or put together from the pieces around one taken out
+	 * ("ESC[20ESC[201~1~").
+	 */
+	private static String bracketed(String text) {
+		return PASTE_START + text.replace("\u001b", "").replace("\u009b", "") + PASTE_END; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 	}
 
 	protected void sendChar(char chKey, boolean altKeyPressed) {
@@ -1288,6 +1315,11 @@ public class VT100TerminalControl implements ITerminalControlForText, ITerminalC
 		});
 	}
 
+	@Override
+	public void enableBracketedPaste(boolean enable) {
+		fBracketedPaste = enable;
+	}
+
 	/**
 	 * @param runnable run in display thread
 	 */
@@ -1405,6 +1437,13 @@ public class VT100TerminalControl implements ITerminalControlForText, ITerminalC
 	@Override
 	public String getHoverSelection() {
 		return fCtlText.getHoverSelection();
+	}
+
+	@Override
+	public void showCursor(boolean show) {
+		if (fPollingTextCanvasModel != null) {
+			fPollingTextCanvasModel.setCursorHidden(!show);
+		}
 	}
 
 	@Override

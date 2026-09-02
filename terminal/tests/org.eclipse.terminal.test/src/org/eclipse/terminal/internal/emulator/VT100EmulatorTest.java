@@ -11,6 +11,7 @@ package org.eclipse.terminal.internal.emulator;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -561,5 +562,41 @@ public class VT100EmulatorTest {
 		// back on the normal screen, clearing it keeps it again
 		run("\u001b[2J");
 		assertEquals(height + 2, data.getHeight());
+	}
+
+	@Test
+	public void testDecPrivateModes() {
+		// the cursor hidden and shown again by a program
+		run("\u001b[?25l");
+		assertFalse(control.isCursorShown());
+		run("\u001b[?25h");
+		assertTrue(control.isCursorShown());
+		// several modes in one sequence, as ncurses sends them: every one of them counts
+		run("\u001b[?2004;25l");
+		assertAll(() -> assertFalse(control.isCursorShown()), () -> assertFalse(control.isBracketedPaste()));
+		run("\u001b[?25;2004h");
+		assertAll(() -> assertTrue(control.isCursorShown()), () -> assertTrue(control.isBracketedPaste()));
+	}
+
+	@Test
+	public void testResetStateEndsDecPrivateModes() {
+		run("\u001b[?25l\u001b[?2004h");
+		assertAll(() -> assertFalse(control.isCursorShown()), () -> assertTrue(control.isBracketedPaste()));
+		// the connection ends while the program has them set; the next one starts clean
+		emulator.resetState();
+		assertAll(() -> assertTrue(control.isCursorShown()), () -> assertFalse(control.isBracketedPaste()));
+	}
+
+	@Test
+	public void testPasteText() {
+		// each line break goes as a CR, as the Enter key sends it: a Windows CR LF is one break
+		assertEquals("a\rb\rc\rd", VT100TerminalControl.pasteText("a\r\nb\nc\rd", false));
+		String start = "\033[200~", end = "\033[201~";
+		assertEquals(start + "a\rb" + end, VT100TerminalControl.pasteText("a\r\nb", true));
+		// the text cannot end the paste early: every ESC and C1 CSI goes
+		assertEquals(start + "a[201~b" + end, VT100TerminalControl.pasteText("a\033[201~b", true));
+		// not even with a marker put together from the pieces left after taking one out
+		assertEquals(start + "[20[201~1~x" + end, VT100TerminalControl.pasteText("\033[20\033[201~1~x", true));
+		assertEquals(start + "201~x" + end, VT100TerminalControl.pasteText("\u009b201~x", true));
 	}
 }
