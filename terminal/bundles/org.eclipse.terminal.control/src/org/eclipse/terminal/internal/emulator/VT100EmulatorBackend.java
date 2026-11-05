@@ -14,6 +14,8 @@
  *******************************************************************************/
 package org.eclipse.terminal.internal.emulator;
 
+import java.util.Arrays;
+
 import org.eclipse.terminal.internal.model.CharWidth;
 import org.eclipse.terminal.internal.model.TerminalTextDataStore;
 import org.eclipse.terminal.model.ITerminalTextData;
@@ -111,6 +113,7 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 	/** the rendition the shell had selected: 1049 saves it with the cursor, as DECSC does */
 	private TerminalStyle fNormalStyle;
 	private boolean fVT100LineWrapping;
+	private boolean fAutoWrap = true;
 	private ScrollRegion fScrollRegion = ScrollRegion.FULL_WINDOW;
 
 	public VT100EmulatorBackend(ITerminalTextData terminal) {
@@ -453,7 +456,7 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 			assert n > 0;
 			int line = toAbsoluteLine(fCursorLine);
 			int nLines = Math.min(fTerminal.getHeight() - line, fScrollRegion.getBottomLine() - fCursorLine + 1);
-			fTerminal.scroll(line, nLines, n);
+			scrollRegion(line, nLines, n);
 		}
 	}
 
@@ -488,8 +491,18 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 			assert n > 0;
 			int line = toAbsoluteLine(fCursorLine);
 			int nLines = Math.min(fTerminal.getHeight() - line, fScrollRegion.getBottomLine() - fCursorLine + 1);
-			fTerminal.scroll(line, nLines, -n);
+			scrollRegion(line, nLines, -n);
 		}
+	}
+
+	/**
+	 * Moves {@code size} lines from {@code line} by {@code shift}. A count past the
+	 * region moves everything out of it and stops there, as in xterm: the model
+	 * would otherwise clean as many lines as the count, past the region's end.
+	 * MUST be called from a synchronized block!
+	 */
+	private void scrollRegion(int line, int size, int shift) {
+		fTerminal.scroll(line, size, Math.max(-size, Math.min(shift, size)));
 	}
 
 	private boolean isCusorInScrollingRegion() {
@@ -560,6 +573,11 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 						continue;
 					}
 					if (width > room) {
+						if (!fAutoWrap && width <= fColumns) {
+							// no wrap: the character goes in the last cells it fits in
+							setCursorColumn(fColumns - width);
+							continue;
+						}
 						if (fCursorColumn > 0) {
 							// a wide character is never split across the right margin,
 							// and the cell it leaves unused there is erased
@@ -591,7 +609,10 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 				}
 				// wrap needed?
 				if (col == fColumns) {
-					if (fVT100LineWrapping) {
+					if (!fAutoWrap) {
+						// the next character replaces this one
+						setCursorColumn(col - 1);
+					} else if (fVT100LineWrapping) {
 						// deferred line wrapping (eat_newline_glitch)
 						setCursorColumn(col - 1);
 						fWrapPending = true;
@@ -800,6 +821,44 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 	}
 
 	@Override
+	public void setAutoWrap(boolean enable) {
+		synchronized (fTerminal) {
+			fAutoWrap = enable;
+			fWrapPending = false;
+		}
+	}
+
+	@Override
+	public int getScrollRegionTop() {
+		synchronized (fTerminal) {
+			return Math.min(fScrollRegion.getTopLine(), fLines - 1);
+		}
+	}
+
+	@Override
+	public int getScrollRegionBottom() {
+		synchronized (fTerminal) {
+			return Math.min(fScrollRegion.getBottomLine(), fLines - 1);
+		}
+	}
+
+	@Override
+	public void fillScreen(char c) {
+		synchronized (fTerminal) {
+			char[] row = new char[fColumns];
+			Arrays.fill(row, c);
+			for (int line = 0; line < fLines; line++) {
+				int absolute = toAbsoluteLine(line);
+				if (absolute >= 0) {
+					fTerminal.cleanLine(absolute);
+					fTerminal.setChars(absolute, 0, row, null);
+				}
+			}
+			fWrapPending = false;
+		}
+	}
+
+	@Override
 	public void setInsertMode(boolean enable) {
 		fInsertMode = enable;
 	}
@@ -819,7 +878,7 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 		synchronized (fTerminal) {
 			int line = toAbsoluteLine(fScrollRegion.getTopLine());
 			int nLines = Math.min(fTerminal.getHeight() - line, fScrollRegion.getHeight());
-			fTerminal.scroll(line, nLines, -n);
+			scrollRegion(line, nLines, -n);
 		}
 	}
 
@@ -829,7 +888,7 @@ public class VT100EmulatorBackend implements IVT100EmulatorBackend {
 		synchronized (fTerminal) {
 			int line = toAbsoluteLine(fScrollRegion.getTopLine());
 			int nLines = Math.min(fTerminal.getHeight() - line, fScrollRegion.getHeight());
-			fTerminal.scroll(line, nLines, n);
+			scrollRegion(line, nLines, n);
 		}
 	}
 

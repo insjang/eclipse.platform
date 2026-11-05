@@ -11,6 +11,8 @@ package org.eclipse.terminal.internal.emulator;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -360,6 +362,9 @@ public class VT100EmulatorTest {
 		run(CURSOR_POSITION_TOP_LEFT + "\n");
 		assertAll(() -> assertCursorLocation(2, 0), () -> assertTextEquals(expected));
 		run(SCROLL_REGION(2, WINDOW_LINES));
+		// setting the margins puts the cursor home, as on a VT100; back to the top margin
+		assertCursorLocation(1, 0);
+		run(CURSOR_POSITION(2, 1));
 		run(SCROLL_REVERSE);
 		expected.add(2, "");
 		assertAll(() -> assertCursorLocation(2, 0), () -> assertTextEquals(expected));
@@ -393,6 +398,274 @@ public class VT100EmulatorTest {
 		);
 		assertAll(() -> assertTextEquals("HELLO"),
 				() -> assertEquals(List.of("TITLE1", "TITLE2"), control.getAllTitles()));
+	}
+
+	@Test
+	public void testUnsupportedStringsAreNotShown() {
+		// DCS (an XTGETTCAP query), SOS, PM and APC, each up to its ST
+		run("a\033P+q544e\033\\b\033Xsos\033\\c\033^pm\033\\d\033_apc\033\\e");
+		assertTextEquals("abcde");
+		// an ESC inside the string that is not an ST starts a new sequence
+		run("\033Pdcs\033[2Cf");
+		assertTextEquals("abcde  f");
+	}
+
+	@Test
+	public void testUnsupportedEscapesAreNotShown() {
+		// ESC # 6 (double width line), ESC SP F (7-bit controls) and ESC % G (UTF-8)
+		// have intermediate bytes
+		run("\033#6a\033 Fb\033%Gc");
+		assertTextEquals("abc");
+	}
+
+	@Test
+	public void testUnsupportedControlSequencesAreNotShownOrRun() {
+		// intermediate bytes: CSI 2 SP q (cursor style), and CSI 1 SP @ (shift left) is not ICH
+		run("ab", "\033[2 q", "\033[1;1H", "\033[1 @");
+		assertAll(() -> assertCursorLocation(0, 0), () -> assertTextEquals("ab"));
+		// private markers other than '?' are not DEC private modes: CSI = 1049 h
+		run("\033[>4;1m\033[=1049hc");
+		assertTextEquals("cb");
+	}
+
+	@Test
+	public void testControlCharactersRunInsideASequence() {
+		// as vttest checks: the BS runs, then CSI 2 C goes on
+		run("ABCD\r", "\033[2\bC", "x");
+		assertTextEquals("ABxD");
+		// a CR and a LF inside, then CSI 1 A
+		run("\033[1\r\nAy");
+		assertAll(() -> assertTextEquals("yBxD"), () -> assertCursorLocation(0, 1));
+		// ESC inside a sequence starts a new one
+		run("\033[3\033[2Cz");
+		assertTextEquals("yBxz");
+	}
+
+	@Test
+	public void testCancelAndSubstituteEndASequence() {
+		// CSI 12 CAN X: the X is a character, not ECH
+		run("ab\r\033[12\u0018X");
+		assertTextEquals("Xb");
+		run("\033]0;never\u001aY");
+		assertAll(() -> assertTextEquals("XY"), () -> assertEquals(List.of(), control.getAllTitles()));
+	}
+
+	@Test
+	public void testOtherControlCharactersAreNotShown() {
+		// SO, SI, ENQ and DEL are not characters on the screen; VT and FF move down as LF
+		run("a\u000eb\u000fc\u0005d\u007fe\u000bf\u000cg");
+		assertTextEquals("abcde", "     f", "      g");
+	}
+
+	@Test
+	public void testDeviceAttributes() {
+		// DA1: a VT100 with advanced video, as xterm in VT100 mode; DA2: type 0, version 0
+		run("\033[c\033[0c\033[>c\033[>0c\033[1c");
+		assertEquals("\033[?1;2c\033[?1;2c\033[>0;0;0c\033[>0;0;0c", control.takeOutput());
+	}
+
+	@Test
+	public void testZeroParameterMeansOne() {
+		// ECMA-48: a count or a position of 0 is the same as leaving it out
+		run("abcdef\r\033[0C\033[0P");
+		assertAll(() -> assertTextEquals("acdef"), () -> assertCursorLocation(0, 1));
+		run("\033[0@");
+		assertTextEquals("a cdef");
+		run("\033[0C\033[0X");
+		assertTextEquals("a  def");
+		run("\033[3;0H\033[0A");
+		assertCursorLocation(1, 0);
+		run("\033[0;0H");
+		assertCursorLocation(0, 0);
+	}
+
+	@Test
+	public void testIndexAndNextLine() {
+		// IND goes down a line in the same column, NEL to the start of the next one
+		run("A\033DB\033EC");
+		assertTextEquals("A", " B", "C");
+	}
+
+	@Test
+	public void testTabStops() {
+		// one every 8 columns to begin with
+		run("\t1");
+		// TBC 3 clears them all, HTS sets one at column 21
+		run("\033[3g\033[1;21H\033H\r\t2");
+		// CBT goes back to it, CHT past the last stop goes to the right margin
+		run("\033[Z3\033[1;1H\033[2I4");
+		assertTextEquals(" ".repeat(8) + "1" + " ".repeat(11) + "3" + " ".repeat(58) + "4");
+		// TBC 0 clears the stop at the cursor only, so a tab goes to the right margin
+		run("\033[1;21H\033[0g\r\t5");
+		assertTextEquals(" ".repeat(8) + "1" + " ".repeat(11) + "3" + " ".repeat(58) + "5");
+	}
+
+	@Test
+	public void testRepeatPrecedingCharacter() {
+		run("A\033[3b");
+		assertTextEquals("AAAA");
+		// after a control there is no preceding character to repeat
+		run("\r\n\033[3bx\033[0b");
+		assertTextEquals("AAAA", "xx");
+	}
+
+	@Test
+	public void testHvpAndScoSaveRestore() {
+		run("\033[3;4fF");
+		assertCursorLocation(2, 4);
+		run("\033[2;2H\033[s\033[10;10H\033[uS");
+		assertAll(() -> assertTextEquals("", " S", "   F"), () -> assertCursorLocation(1, 2));
+	}
+
+	@Test
+	public void testScreenAlignmentTest() {
+		data.setMaxHeight(1000);
+		run("\033[5;10r\033[3;3H\033#8");
+		List<String> expected = new ArrayList<>();
+		for (int i = 0; i < WINDOW_LINES; i++) {
+			expected.add("E".repeat(WINDOW_COLUMNS));
+		}
+		assertAll(() -> assertTextEquals(expected), () -> assertCursorLocation(0, 0));
+		// the margins are reset: a line feed at the bottom scrolls the whole screen
+		run(CURSOR_POSITION(WINDOW_LINES, 1) + "\nx");
+		expected.add("x");
+		assertTextEquals(expected);
+	}
+
+	@Test
+	public void testAutoWrapOff() {
+		// DECAWM off: what goes past the right margin replaces the last character
+		run("\033[?7l", "x".repeat(WINDOW_COLUMNS + 5), "Y");
+		assertAll(() -> assertTextEquals("x".repeat(WINDOW_COLUMNS - 1) + "Y"),
+				() -> assertCursorLocation(0, WINDOW_COLUMNS - 1));
+		// on again, the next character wraps
+		run("\033[?7hZz");
+		assertTextEquals("x".repeat(WINDOW_COLUMNS - 1) + "Z", "z");
+	}
+
+	@Test
+	public void testOriginMode() {
+		// DECOM: positions count from the top margin and stay inside the region
+		run("\033[10;12r\033[?6h");
+		assertCursorLocation(9, 0);
+		run("\033[1;1HO\033[5;1HP\033[6n");
+		assertAll(() -> assertCursorLocation(11, 1), () -> assertEquals("\033[3;2R", control.takeOutput()));
+		// off, the cursor goes to the top of the screen
+		run("\033[?6l");
+		assertCursorLocation(0, 0);
+		run("\033[r");
+		List<String> expected = new ArrayList<>();
+		for (int i = 0; i < 12; i++) {
+			expected.add(i == 9 ? "O" : i == 11 ? "P" : "");
+		}
+		assertTextEquals(expected);
+	}
+
+	@Test
+	public void testLineDrawing() {
+		// ESC ( 0 puts DEC's special graphics in G0, ESC ( B ASCII again
+		run("\033(0lqk\033(B x");
+		assertTextEquals("┌─┐ x");
+		// SO and SI switch between G1 and G0
+		run("\033)0\u000eq\u000fq");
+		assertTextEquals("┌─┐ x─q");
+		// a full reset puts ASCII back
+		run("\033(0\033c\033[3Jq");
+		assertTextEquals("q");
+	}
+
+	@Test
+	public void testSavedRenditionIsPerScreen() {
+		// ESC 7 saves the rendition with the cursor, one slot per screen as the cursor
+		run("\033[31mR\0337\033[0m");
+		run(ALTERNATE_SCREEN_ON + "\033[32mG\0337\033[0m\0338g");
+		int alternate = data.getHeight() - WINDOW_LINES;
+		assertEquals(data.getStyle(alternate, 0), data.getStyle(alternate, 1));
+		// back on the normal screen, its own slot: red, not the alternate screen's green
+		run(ALTERNATE_SCREEN_OFF + "\033[0m\0338r");
+		int normal = data.getHeight() - WINDOW_LINES;
+		assertAll(() -> assertTextEquals("Rr"),
+				() -> assertEquals(data.getStyle(normal, 0), data.getStyle(normal, 1)));
+	}
+
+	@Test
+	public void testFullResetForgetsTheSavedRenditionAndCharacterSet() {
+		run("\033[31m\033(0\0337\033c\0338q\033[0mz");
+		int line = data.getHeight() - WINDOW_LINES;
+		assertAll(() -> assertTextEquals("qz"), () -> assertEquals(data.getStyle(line, 1), data.getStyle(line, 0)));
+	}
+
+	@Test
+	public void testNewCursorMovesForgetAPendingWrap() {
+		emulator.setVT100LineWrapping(true);
+		// each fills the first line, leaving a wrap pending, then moves: the next
+		// character goes where the move put it and the line is not marked wrapped
+		String full = "\033[1;1H" + "w".repeat(WINDOW_COLUMNS);
+		run(full, "\033[3dv"); // VPA
+		run(full, "\033[4;80fh"); // HVP
+		run(full, "\033[5;10r\033[r", "s"); // DECSTBM, the cursor home
+		String blank = " ".repeat(WINDOW_COLUMNS - 1);
+		assertAll(() -> assertTextEquals("s" + "w".repeat(WINDOW_COLUMNS - 1), "", blank + "v", blank + "h"),
+				() -> assertFalse(data.isWrappedLine(0)));
+	}
+
+	@Test
+	public void testScreenAlignmentIgnoresTheBackground() {
+		// DECALN writes in the default rendition, not in the current background
+		run("\033[42m\033#8");
+		assertAll(() -> assertNull(data.getStyle(0, 0)),
+				() -> assertNull(data.getStyle(WINDOW_LINES - 1, WINDOW_COLUMNS - 1)));
+	}
+
+	@Test
+	public void testWideCharactersWithAutoWrapOffAndRepeat() {
+		// with auto wrap off a wide character at the margin takes the last two cells
+		run("\033[?7l", "x".repeat(WINDOW_COLUMNS - 1), "한");
+		assertTextEquals("x".repeat(WINDOW_COLUMNS - 2) + "한");
+		// REP repeats a whole wide character, and a whole surrogate pair
+		run("\033[?7h\033[2;1H한\033[2b\r\n😀\033[1b");
+		assertTextEquals("x".repeat(WINDOW_COLUMNS - 2) + "한", "한 한 한", "😀😀");
+	}
+
+	@Test
+	public void testLineDrawingTakesOneCell() {
+		run("\033(0lqk\033(B");
+		assertCursorLocation(0, 3);
+	}
+
+	@Test
+	public void testLineCountsPastTheRegionStayInIt() {
+		// IL, DL, SU and SD with a count past the scroll region empty the region and
+		// leave the lines outside it alone, as in xterm
+		for (String command : List.of("\033[30L", "\033[30M", "\033[30S", "\033[30T", "\033[23L\033[23M")) {
+			List<String> expected = new ArrayList<>();
+			StringBuilder numbered = new StringBuilder("\033[r");
+			for (int i = 1; i <= WINDOW_LINES; i++) {
+				numbered.append(CURSOR_POSITION(i, 1)).append(i);
+				expected.add(i == 1 || i == WINDOW_LINES ? String.valueOf(i) : "");
+			}
+			run(numbered.toString(), SCROLL_REGION(2, WINDOW_LINES - 1), CURSOR_POSITION(2, 1), command);
+			assertTextEquals(expected);
+		}
+	}
+
+	@Test
+	public void testCursorMovesStopAtTheMargins() {
+		run(SCROLL_REGION(5, 10));
+		// from inside the region CUD, CUU, CNL and CPL stop at its margins
+		run(CURSOR_POSITION(7, 3), "\033[20B");
+		assertCursorLocation(9, 2);
+		run("\033[20A");
+		assertCursorLocation(4, 2);
+		run("\033[20E");
+		assertCursorLocation(9, 0);
+		run("\033[20F");
+		assertCursorLocation(4, 0);
+		// from outside it they stop at the screen's edges only
+		run(CURSOR_POSITION(12, 1), "\033[20B");
+		assertCursorLocation(WINDOW_LINES - 1, 0);
+		run(CURSOR_POSITION(3, 1), "\033[20A");
+		assertCursorLocation(0, 0);
 	}
 
 	@Test

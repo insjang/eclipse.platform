@@ -224,6 +224,28 @@ public interface IVT100EmulatorBackend {
 	void setVT100LineWrapping(boolean enable);
 
 	/**
+	 * Auto wrap mode (DECAWM, CSI ? 7 h/l), on by default. Off, a character
+	 * written at the right margin replaces the one there and the cursor stays.
+	 */
+	void setAutoWrap(boolean enable);
+
+	/**
+	 * @return the first line of the scroll region, in screen lines
+	 */
+	int getScrollRegionTop();
+
+	/**
+	 * @return the last line of the scroll region, in screen lines
+	 */
+	int getScrollRegionBottom();
+
+	/**
+	 * Fills every cell of the screen with the character in the default rendition,
+	 * as the screen alignment test (DECALN, ESC # 8) does. The cursor does not move.
+	 */
+	void fillScreen(char c);
+
+	/**
 	 * @return whether VT100 line wrapping mode is enabled
 	 */
 	boolean isVT100LineWrapping();
